@@ -102,7 +102,7 @@ constexpr gpio_num_t RS485_TX = GPIO_NUM_2;
 
 // Onboard WS2812 RGB LED and single button - used for status feedback in
 // place of the Tough's display/touch (see main_atom_node.cpp). Matches
-// RTS-ESPNOW-Gateway's node-firmware, which uses the same board.
+// RTSNow-Gateway's node-firmware, which uses the same board.
 constexpr gpio_num_t RGB_LED = GPIO_NUM_35;
 constexpr gpio_num_t BUTTON = GPIO_NUM_41;
 

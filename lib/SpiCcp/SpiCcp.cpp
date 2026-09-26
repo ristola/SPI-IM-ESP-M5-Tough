@@ -566,6 +566,17 @@ bool SpiCcp::pollRaw(uint8_t devId, uint8_t addr, uint8_t cmd1, uint8_t cmd2, ui
 bool SpiCcp::select(uint8_t devId, uint8_t addr, uint8_t cmd1, uint8_t cmd2, const uint8_t *data, size_t dataLen,
                     uint32_t timeoutMs)
 {
+  for (uint8_t attempt = 0; attempt <= kMaxSelectRetries; attempt++)
+  {
+    if (selectOnce(devId, addr, cmd1, cmd2, data, dataLen, timeoutMs))
+      return true;
+  }
+  return false; // lastOutcome_/lastTxHex_/lastRxHex_ already reflect the final attempt
+}
+
+bool SpiCcp::selectOnce(uint8_t devId, uint8_t addr, uint8_t cmd1, uint8_t cmd2, const uint8_t *data, size_t dataLen,
+                        uint32_t timeoutMs)
+{
   flushStaleRx();
   sendSelectionSequence(devId, addr, cmd1, cmd2, /*isSelect=*/true);
 

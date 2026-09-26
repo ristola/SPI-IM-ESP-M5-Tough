@@ -61,23 +61,38 @@ bool EquipmentModel::hasRegister(uint16_t modbusReg) const {
   return present_[modbusReg - kFirstRegister];
 }
 
+bool EquipmentModel::isSignedRegister(uint16_t modbusReg) const {
+  if (modbusReg < kFirstRegister || modbusReg > kLastRegister) return false;
+  return signed_[modbusReg - kFirstRegister];
+}
+
+uint32_t EquipmentModel::registerAgeMs(uint16_t modbusReg) const {
+  if (!hasRegister(modbusReg)) return UINT32_MAX;
+  return millis() - lastUpdatedMs_[modbusReg - kFirstRegister];
+}
+
 // See header comment. Deliberately does not update regs_/present_ itself
 // after a successful SELECT - the next round-robin poll of this same
 // register (every model polls these at least every couple of pollNext()
 // cycles) picks up the confirmed new value from the tributary itself,
 // rather than optimistically trusting what we just sent.
 bool EquipmentModel::writeRegister(uint16_t reg, float value) {
-  // Process Setpoint (40010) and Process Limit Delta (40011) are 4-byte
-  // float writes. Machine Status (40014) is a 2-byte u16 instead - per
-  // the user's own confirmed usage on an FN dryer, 0=off, 1=on, 3=clear
-  // alarms (not itself a state, a momentary command). Found the same way
-  // for all three: whichever query has an exact (not range/list) match
-  // for this register in its registers spec supplies the right cmd1/cmd2
-  // - this is why it works unmodified for every model that has that
-  // query, and correctly does nothing for one that doesn't (e.g.
-  // Crystallizer, which doesn't poll Machine Status at all since cmd2=
-  // 0x48 means something else entirely on that device).
-  if (reg != 40010 && reg != 40011 && reg != 40014) return false;
+  // Process Setpoint (40010), Process Limit Delta (40011), and Dew Point
+  // Trigger (40017) are 4-byte float writes. Machine Status (40014) is a
+  // 2-byte u16 instead - per the user's own confirmed usage on an FN
+  // dryer, 0=off, 1=on, 3=clear alarms (not itself a state, a momentary
+  // command). Found the same way for all four: whichever query has an
+  // exact (not range/list) match for this register in its registers spec
+  // supplies the right cmd1/cmd2 - this is why it works unmodified for
+  // every model that has that query, and correctly does nothing for one
+  // that doesn't (e.g. Crystallizer, which polls neither Machine Status
+  // nor Dew Point Trigger at all - cmd2=0x48/0x80 mean something else or
+  // nothing on that device). 40017 specifically: every dryer model
+  // (FC/FD/FN/ADV/CD) has an identical "Dew Trigger" query (cmd2=0x80,
+  // registers="40017"), confirmed by reading each model's own query
+  // table - this was simply never added to the allowlist below even
+  // though the read side has polled it since the very first pass.
+  if (reg != 40010 && reg != 40011 && reg != 40014 && reg != 40017) return false;
   char regStr[6];
   snprintf(regStr, sizeof(regStr), "%u", reg);
   for (size_t i = 0; i < queryCount(); i++) {
@@ -101,15 +116,24 @@ void EquipmentModel::setFloatRegister(uint16_t modbusReg, float value) {
   // Registers hold the value truncated to a plain integer in its
   // engineering unit (e.g. degrees F), matching this project's existing
   // convention (see Reference/'s int(v) truncation, and DryerFD's
-  // original implementation this was lifted from).
-  regs_[modbusReg - kFirstRegister] = static_cast<uint16_t>(value);
+  // original implementation this was lifted from). Truncating straight to
+  // uint16_t is undefined behavior for a negative value (e.g. a -40 dew
+  // point) since it's out of that type's range - go through int16_t
+  // first, which is well-defined for any value in the actual sensor
+  // range, then let the int16_t->uint16_t conversion give the correct
+  // two's-complement bit pattern for the Modbus register.
+  regs_[modbusReg - kFirstRegister] = static_cast<uint16_t>(static_cast<int16_t>(value));
   present_[modbusReg - kFirstRegister] = true;
+  signed_[modbusReg - kFirstRegister] = true;
+  lastUpdatedMs_[modbusReg - kFirstRegister] = millis();
 }
 
 void EquipmentModel::setStatusRegister(uint16_t modbusReg, uint16_t value) {
   if (modbusReg < kFirstRegister || modbusReg > kLastRegister) return;
   regs_[modbusReg - kFirstRegister] = value;
   present_[modbusReg - kFirstRegister] = true;
+  signed_[modbusReg - kFirstRegister] = false;
+  lastUpdatedMs_[modbusReg - kFirstRegister] = millis();
 }
 
 void EquipmentModel::pollProcessSetpoint(uint8_t cmd1) {

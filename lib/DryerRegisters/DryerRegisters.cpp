@@ -61,9 +61,12 @@ uint16_t onSetModelType(TRegister* reg, uint16_t val) {
 //
 // Deliberately does NOT call ActiveModel->writeRegister() here - that
 // blocks on the real SPI-CCP SELECT handshake (selection confirm, then
-// data block, then the tributary's ACK/NAK - up to ~2s total if the
-// equipment doesn't answer promptly), and this callback runs synchronously
-// inside the Modbus library's own request handling. Confirmed against a
+// data block, then the tributary's ACK/NAK), and this callback runs
+// synchronously inside the Modbus library's own request handling. Worst
+// case is now longer still: SpiCcp::select() retries up to
+// kMaxSelectRetries times on a garbled/missing reply (see its comment),
+// so a fully exhausted retry budget can take several seconds, not the ~2s
+// a single attempt cost when this comment was first written. Confirmed against a
 // real Modbus client during development: it reported the *write's own TCP
 // response* as a timeout purely because of that blocking, even on a write
 // that had in fact gone out - a false negative from this callback taking
@@ -131,7 +134,29 @@ void DryerRegisters::processPendingWrite() {
 
 void DryerRegisters::set(uint8_t index, uint16_t value) {
   if (index >= DryerPacket::kMaxRegisters) return;
+  // cbEnable(false) around this call is load-bearing, not cosmetic: modbus-
+  // esp8266's Modbus::Reg(address, value) (what Hreg() calls under the
+  // hood) invokes the exact same onSetHreg callback for this library-
+  // internal write as it does for a genuine remote Modbus client write,
+  // gated only by a single global cbEnabled flag with no way to tell the
+  // two apart otherwise. Without this guard, every poll cycle's own
+  // Machine Status (40014) mirror update - just echoing back what was
+  // literally just read over SPI-CCP - re-triggered onSetSpiRegister() ->
+  // queuePendingWrite() -> a real outbound SPI SELECT to the physical
+  // dryer, on every single poll, not only when an operator actually
+  // requested a change. Confirmed on real hardware: plugging in this node
+  // while the dryer was already running from its own panel shut it down
+  // (some early poll cycle's read - before the very first real SPI reply
+  // settled - got echoed straight back out as a "Machine Status = 0/
+  // stopped" command), while starting it from the desktop app instead (an
+  // intentional external write) left it running, since the polled value
+  // already matched whatever got echoed back afterward. Safe to toggle
+  // here with no lock: this project's Modbus TCP handling
+  // (DryerRegisters::task()) and this set() are both only ever called from
+  // the single Arduino loop(), never concurrently.
+  _mb.cbEnable(false);
   _mb.Hreg(index, value);
+  _mb.cbEnable(true);
 }
 
 uint16_t DryerRegisters::get(uint8_t index) {

@@ -77,10 +77,28 @@ public:
   String lastTxHex() const { return lastTxHex_; }
   String lastRxHex() const { return lastRxHex_; }
 
+  // Retries for select() - a garbled/missing reply here is presumptively a
+  // transient RS-485 glitch (marginal line noise, half-duplex turnaround
+  // timing, a power sag - see BootDiag's brownout finding), not "this
+  // command doesn't exist," unlike Discovery's blind scan: select() always
+  // targets a devId already known to be a real, present tributary. 3
+  // retries (4 attempts total) per the field report that a legitimate
+  // Machine Status write (see DryerRegisters::onSetSpiRegister) failed
+  // with a framing mismatch (one garbled reply byte), then succeeded
+  // cleanly on a later, unrelated attempt - i.e. exactly the kind of
+  // one-off glitch retrying is for.
+  static constexpr uint8_t kMaxSelectRetries = 3;
+
   // Sends a SELECT (write) request with the given data and blocks for the
-  // tributary's acknowledgment. This is two round trips: the selection
-  // sequence (tributary confirms it's ready to receive) then the data
-  // block itself (tributary ACKs or NAKs it).
+  // tributary's acknowledgment, retrying up to kMaxSelectRetries times
+  // (see its comment) on any failure. This is two round trips per attempt:
+  // the selection sequence (tributary confirms it's ready to receive)
+  // then the data block itself (tributary ACKs or NAKs it) - so a fully
+  // exhausted retry budget can block the caller for roughly
+  // (kMaxSelectRetries+1) * timeoutMs, up to ~4s at the default
+  // timeoutMs=1000 - same "runs from loop(), not the Modbus write's own
+  // synchronous callback" reasoning as DryerRegisters::onSetSpiRegister's
+  // comment already relies on for the un-retried cost this replaces.
   bool select(uint8_t devId, uint8_t addr, uint8_t cmd1, uint8_t cmd2, const uint8_t *data, size_t dataLen,
               uint32_t timeoutMs = 1000);
 
@@ -107,6 +125,8 @@ private:
   bool readByte(uint8_t &b, uint32_t deadlineMs);
   void flushStaleRx();
   void sendSelectionSequence(uint8_t devId, uint8_t addr, uint8_t cmd1, uint8_t cmd2, bool isSelect);
+  bool selectOnce(uint8_t devId, uint8_t addr, uint8_t cmd1, uint8_t cmd2, const uint8_t *data, size_t dataLen,
+                   uint32_t timeoutMs);
   static String hexDump(const uint8_t *data, size_t len);
   static size_t stuffDle(uint8_t *out, size_t outCap, const uint8_t *in, size_t inLen);
 };

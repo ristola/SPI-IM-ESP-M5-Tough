@@ -61,6 +61,25 @@ class EquipmentModel {
   uint16_t getRegister(uint16_t modbusReg) const;
   bool hasRegister(uint16_t modbusReg) const;
 
+  // True if this register was last populated via setFloatRegister() (a
+  // signed engineering value, e.g. Dew Point can read -40) rather than
+  // setStatusRegister() (an unsigned bitfield, e.g. Process Status) - lets
+  // a display layer know whether to reinterpret the raw 16-bit word as
+  // int16_t. The Modbus wire value itself (getRegister()) is unaffected;
+  // this only matters for rendering it as a human-readable number.
+  bool isSignedRegister(uint16_t modbusReg) const;
+
+  // Milliseconds since this register's value was last actually refreshed
+  // from the device (setFloatRegister()/setStatusRegister()) - lets the
+  // dashboard show "how stale is this" instead of just "live"/"no data
+  // yet", which doesn't distinguish a register updated 2s ago from one
+  // whose last successful poll was 10 minutes ago (e.g. a query round-
+  // robin stalled on a different, now-unresponsive query). Returns
+  // UINT32_MAX if the register has never been populated at all - millis()
+  // itself starts at 0 on boot, so 0 is a real, valid "just updated"
+  // timestamp and can't double as a sentinel.
+  uint32_t registerAgeMs(uint16_t modbusReg) const;
+
   // Attempts to write a new value to a register via SPI-CCP SELECT.
   // Currently wired up for Process Setpoint (40010), Process Limit Delta
   // (40011), and Machine Status (40014) - finds this model's own cmd1 for
@@ -115,4 +134,6 @@ class EquipmentModel {
   static constexpr uint8_t kRegisterCount = kLastRegister - kFirstRegister + 1;
   uint16_t regs_[kRegisterCount] = {0};
   bool present_[kRegisterCount] = {false};
+  bool signed_[kRegisterCount] = {false};
+  uint32_t lastUpdatedMs_[kRegisterCount] = {0};
 };

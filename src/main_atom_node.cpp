@@ -33,6 +33,7 @@
 
 #include <cstring>
 
+#include "BootDiag.h"
 #include "DeviceSettings.h"
 #include "Discovery.h"
 #include "DryerPacket.h"
@@ -137,7 +138,7 @@ namespace
     EspNow.broadcast(reinterpret_cast<uint8_t *>(&packet), sizeof(packet));
   }
 
-  // Answers RTS-ESPNOW-Gateway/its desktop app's on-demand "poll registers"
+  // Answers RTSNow-Gateway/its desktop app's on-demand "poll registers"
   // request (see rtsnow_node.h's registerBlockProvider) - see main.cpp's
   // identical fillRegisterBlock() for the full rationale (same register
   // range as Registers.get() already serves over Modbus TCP, just pulled
@@ -294,7 +295,7 @@ namespace
 
   // --- Status LED --------------------------------------------------------
   // One onboard WS2812, standing in for the Tough's header-bar icons. Single
-  // pixel on both boards, matches RTS-ESPNOW-Gateway's node-firmware (same
+  // pixel on both boards, matches RTSNow-Gateway's node-firmware (same
   // AtomS3 Lite board) - see that project's main.cpp for the precedent this
   // follows, including OTA taking priority over every other state.
   constexpr uint16_t kLedCount = 1;
@@ -427,7 +428,7 @@ namespace
   }
 
   // Onboard button held 3s = restart. No provisioning/credentials to "forget"
-  // here (unlike RTS-ESPNOW-Gateway's node-firmware), so this is just a
+  // here (unlike RTSNow-Gateway's node-firmware), so this is just a
   // physical-access restart, matching main.cpp's Tough restart affordance
   // (there, a deliberate button tap on the Settings page) with the closest
   // equivalent these boards' single button can offer.
@@ -460,6 +461,7 @@ namespace
 void setup()
 {
   Serial.begin(115200);
+  BootDiag::begin(); // first thing after Serial - see BootDiag.h
 
 #if defined(BOARD_ATOMLITE)
   // Classic ESP32's GPIO34-39 are input-only with no internal pull
@@ -478,6 +480,7 @@ void setup()
   led.show();
 
   Settings.begin();
+  Discovery.begin(); // recover any devIds/commands a prior interrupted scan already found
 
   bool wifiOk = Network.begin(Settings.wifiSsid().c_str(), Settings.wifiPassword().c_str());
   if (wifiOk)
@@ -536,7 +539,7 @@ void setup()
   bool espNowOk = EspNow.begin();
   Serial.printf("ESP-NOW: %s\n", espNowOk ? "OK" : "FAIL");
 
-  // Lets RTS-ESPNOW-Gateway discover this device - see rtsnow_node.h
+  // Lets RTSNow-Gateway discover this device - see rtsnow_node.h
   // (shared RTSNow library, pulled in via platformio.ini's lib_extra_dirs).
   // Called unconditionally (even if the network failed): rtsnow_node.cpp
   // doesn't require it, it just reports ipv4Address=0 until connected,
@@ -548,8 +551,9 @@ void setup()
 #if defined(BOARD_ATOMS3_POE)
   rtsnowConfig.deviceTypeName = "Ethernet-Node";
 #else
-  rtsnowConfig.deviceTypeName = "FN-MAIN-Node";
+  rtsnowConfig.deviceTypeName = "RTSNow-UNADYN";
 #endif
+  rtsnowConfig.boardName = BOARD_NAME;
   rtsnowConfig.defaultFriendlyName = friendlyName;
   rtsnowConfig.firmwareVersionMajor = FirmwareVersion::kMajor;
   rtsnowConfig.firmwareVersionMinor = FirmwareVersion::kMinor;

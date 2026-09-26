@@ -6,6 +6,7 @@
 
 #include <cstring>
 
+#include "BootDiag.h"
 #include "BootLogo.h"
 #include "DeviceSettings.h"
 #include "Discovery.h"
@@ -113,7 +114,7 @@ static void updateDryerReadings()
   EspNow.broadcast(reinterpret_cast<uint8_t *>(&packet), sizeof(packet));
 }
 
-// Answers RTS-ESPNOW-Gateway/its desktop app's on-demand "poll registers"
+// Answers RTSNow-Gateway/its desktop app's on-demand "poll registers"
 // request (see rtsnow_node.h's registerBlockProvider) - the same live
 // Modbus holding-register table Registers.get() already serves over
 // Modbus TCP and EspNow.broadcast() above, just pulled on demand instead
@@ -148,7 +149,7 @@ static void fillRegisterBlock(RTSNOW_RegisterBlock &outBlock)
 
 // Wired up as RTSNowNodeConfig::onGenericSetting - see
 // main_atom_node.cpp's identical onRemoteSetting() for the full
-// rationale (lets RTS-ESPNOW-Gateway's desktop app push the same 4
+// rationale (lets RTSNow-Gateway's desktop app push the same 4
 // fields the web dashboard's own Equipment/Model/Station ID/Baud buttons
 // already write). No BOARD_ATOMS3_POE branch here - that board variant
 // only exists in main_atom_node.cpp, the Tough always has RS-485.
@@ -265,7 +266,7 @@ static bool onRemoteSetting(const RTSNOW_SettingPayload &setting)
 }
 
 // Wired up as RTSNowNodeConfig::onBeforeReboot - without this, a remote
-// RTSNOW_REBOOT (from RTS-ESPNOW-Gateway/its desktop app) would restart
+// RTSNOW_REBOOT (from RTSNow-Gateway/its desktop app) would restart
 // this unit with no warning at all, same gap the touch-triggered RESTART
 // button on the Settings page already has (see its handler further down -
 // straight to ESP.restart(), no message shown either). Fixing it here
@@ -526,6 +527,7 @@ static void showBootSplash()
 void setup()
 {
   Serial.begin(115200);
+  BootDiag::begin(); // first thing after Serial - see BootDiag.h
 
   auto cfg = M5.config();
   M5.begin(cfg);
@@ -534,6 +536,7 @@ void setup()
   M5.Display.setTextSize(2);
 
   Settings.begin(); // must come before anything below reads a setting
+  Discovery.begin(); // recover any devIds/commands a prior interrupted scan already found
 
   // The home screen is icons only (see drawHeaderBar()); all of this
   // diagnostic detail is still captured here, it just moved to the
@@ -610,17 +613,18 @@ void setup()
 #if defined(ROLE_GATEWAY)
   EspNow.onReceive(onDryerPacket);
 #elif defined(ROLE_NODE)
-  // Lets RTS-ESPNOW-Gateway discover this device - see rtsnow_node.h
+  // Lets RTSNow-Gateway discover this device - see rtsnow_node.h
   // (shared RTSNow library, pulled in via platformio.ini's lib_extra_dirs).
   // Called unconditionally (even if WiFi failed): rtsnow_node.cpp doesn't
   // require WL_CONNECTED, it just reports ipv4Address=0 until it is, same
   // as a mesh-only node. Scoped to ROLE_NODE only - this project's
   // ROLE_GATEWAY is the Modbus TCP aggregation unit, a different concept
-  // from RTS-ESPNOW-Gateway's own AtomS3U hardware gateway, and isn't an
+  // from RTSNow-Gateway's own AtomS3U hardware gateway, and isn't an
   // RTS-NOW node itself (yet - a reasonable follow-up).
   RTSNowNodeConfig rtsnowConfig{};
   rtsnowConfig.projectName = "RTSNow";
-  rtsnowConfig.deviceTypeName = "FN-MAIN-Node";
+  rtsnowConfig.deviceTypeName = "RTSNow-UNADYN";
+  rtsnowConfig.boardName = BOARD_NAME;
   rtsnowConfig.defaultFriendlyName = "SPI-IM Node";
   rtsnowConfig.firmwareVersionMajor = FirmwareVersion::kMajor;
   rtsnowConfig.firmwareVersionMinor = FirmwareVersion::kMinor;
