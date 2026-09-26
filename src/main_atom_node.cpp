@@ -44,6 +44,7 @@
 #include "ModbusRegisterMap.h"
 #include "ModelFactory.h"
 #include "NetworkManager.h"
+#include "PoeStatusServer.h"
 #include "SpiCcp.h"
 #include "pins.h"
 #include "rtsnow_node.h"
@@ -290,6 +291,30 @@ namespace
       return false;
     }
 
+    // No Modbus register to mirror here (unlike equipmentType/model/
+    // spiAddress/spiBaudRate above) - WiFi credentials have no register
+    // slot in the sheet. setWifiCredentials() writes BOTH NVS keys on
+    // every call, so each branch passes through the OTHER field's current
+    // value or it'd get clobbered back to its secrets.h default. Takes
+    // effect on the next boot's WiFi-fallback attempt only - deliberately
+    // no auto-reboot here (see onEspNowOtaActiveChanged's neighboring
+    // comments for the project's general "don't surprise-restart from a
+    // setting handler" stance) - ssid/password arrive as two independent
+    // acked messages, so rebooting after just one would restart with a
+    // mismatched pair before the second has even landed. Send both, then
+    // a separate reboot command once both ack accepted:true.
+    if (strcmp(setting.key, "wifiSsid") == 0 && setting.valueType == RTSNOW_SETTING_STRING)
+    {
+      Settings.setWifiCredentials(setting.stringValue, Settings.wifiPassword());
+      return true;
+    }
+
+    if (strcmp(setting.key, "wifiPassword") == 0 && setting.valueType == RTSNOW_SETTING_STRING)
+    {
+      Settings.setWifiCredentials(Settings.wifiSsid(), setting.stringValue);
+      return true;
+    }
+
     return false;
   }
 
@@ -442,6 +467,30 @@ namespace
   {
     otaLedActive = active;
     updateLed();
+#if defined(BOARD_ATOMS3_POE)
+    // An ESP-NOW-over-mesh OTA transfer sustains hundreds of back-to-back
+    // Update.write() flash writes - observed live to reboot this board
+    // partway through (uptime dropping between two /api/status checks
+    // proved it) once WiFi was also kept associated alongside Ethernet
+    // for network-OTA reachability (see setup() above). The beacon/ARP/
+    // DHCP-renewal housekeeping plus two dual Ethernet+WiFi HTTP
+    // listeners apparently pushes it over some CPU/heap limit during the
+    // write-heavy stretch. Dropping the WiFi association (not
+    // WiFi.mode() - ESP-NOW still needs STA radio mode) for just the
+    // transfer's duration frees that budget without losing network-OTA
+    // reachability the rest of the time; Ethernet keeps the RTS-NOW
+    // protocol and status page up throughout regardless.
+    if (active)
+    {
+      Serial.println("ESP-NOW OTA starting - dropping WiFi association to free up headroom");
+      WiFi.disconnect();
+    }
+    else
+    {
+      Serial.println("ESP-NOW OTA finished - reconnecting WiFi");
+      WiFi.begin(Settings.wifiSsid().c_str(), Settings.wifiPassword().c_str());
+    }
+#endif
   }
 
   // Onboard button held 3s = restart. No provisioning/credentials to "forget"
@@ -518,12 +567,51 @@ void setup()
 #endif
   }
 
+#if defined(BOARD_ATOMS3_POE)
+  // WiFi is brought up unconditionally, even when Ethernet already came up
+  // above - kept specifically so ArduinoOTA (setupOta() below, gated on
+  // wifiOk||poeWifiFallbackOk) has a real network-OTA path independent of
+  // Ethernet: the W5500's own IP lives entirely on its separate hardware
+  // TCP/IP stack, invisible to ArduinoOTA/WiFiUDP (which only ever talks
+  // over the ESP32's native lwIP/WiFi stack), so without this, Ethernet
+  // succeeding would leave this board with no ArduinoOTA-reachable IP at
+  // all. The status page still only shows Ethernet when it's up (see
+  // PoeStatusServer.cpp's writeStatusJsonResponse) - this is a real,
+  // functioning WiFi association kept for OTA/serial-free reachability,
+  // just not surfaced there. Note this does NOT change WiFi.mode(WIFI_STA)
+  // itself - that was already on regardless (ESP-NOW needs the radio in
+  // STA mode even with no AP association at all).
+  Serial.println("Connecting WiFi (kept up alongside Ethernet for network OTA)...");
+  WiFi.begin(Settings.wifiSsid().c_str(), Settings.wifiPassword().c_str());
+  uint32_t wifiFallbackStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiFallbackStart < 10000)
+    delay(250);
+  bool poeWifiFallbackOk = WiFi.status() == WL_CONNECTED;
+  if (poeWifiFallbackOk)
+    Serial.printf("WiFi OK: SSID=%s IP=%s RSSI=%d\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI());
+  else
+    Serial.println("WiFi FAILED (Ethernet may still be up)");
+#endif
+
   if (wifiOk)
   {
     Registers.begin();
     modbusStarted = true;
+#if !defined(BOARD_ATOMS3_POE)
     DryerWeb.begin(); // dashboard at http://<ip>/ - shows the poll queries and live RS485 data
+#endif
   }
+#if defined(BOARD_ATOMS3_POE)
+  // Independent of wifiOk - PoeStatus.begin() starts whichever of its
+  // Ethernet/WiFi listeners has a live connection (see PoeStatusServer.cpp),
+  // so it must run even when Ethernet failed but the WiFi fallback above
+  // succeeded. DryerWeb (WebServer.h/WiFiServer) is never used on this
+  // board at all - see NetworkManager.cpp's own comment for why it could
+  // never be reached over the Ethernet-only IP stack it used to be
+  // (wrongly) paired with here.
+  PoeStatus.begin();
+#endif
 
 #if defined(BOARD_ATOMS3_POE)
   // This board has no RS-485 transceiver wired to anything at all (see
@@ -562,11 +650,31 @@ void setup()
   // doesn't require it, it just reports ipv4Address=0 until connected,
   // same as a mesh-only node.
   char friendlyName[24];
+#if defined(BOARD_ATOMS3_POE)
+  snprintf(friendlyName, sizeof(friendlyName), "Atom-S3-POE");
+#else
   snprintf(friendlyName, sizeof(friendlyName), "SPI-IM Node (%s)", BOARD_NAME);
+#endif
   RTSNowNodeConfig rtsnowConfig{};
   rtsnowConfig.projectName = "RTSNow";
 #if defined(BOARD_ATOMS3_POE)
-  rtsnowConfig.deviceTypeName = "Ethernet-Node";
+  // "Gateway" rather than "Node" purely as a display label reflecting how
+  // this unit is actually used (RTS-NOW's intended main network gateway) -
+  // it's still an RTS-NOW *node* at the protocol level (heartbeats into,
+  // and is remotely flashable by, the real USB-connected gateway); see
+  // the project's "Network TCP gateway on AtomS3 + Atomic PoE Base" plan
+  // for the separate, not-yet-built work that would make it a real
+  // standalone gateway at the protocol level too.
+  //
+  // No hyphen, unlike every other deviceTypeName in this file - "Ethernet-
+  // Gateway" is 16 characters, one over what fits in
+  // RTSNOW_DeviceIdentity.deviceTypeName's char[16] (15 usable + null).
+  // That field is a shared cross-project wire struct (rtsnow_protocol.h's
+  // own comment warns other projects like PolymerPak embed it without
+  // being rebuilt in lockstep), so growing the field was off the table -
+  // found live as silent truncation to "Ethernet-Gatewa" in the gateway's
+  // known_devices list.
+  rtsnowConfig.deviceTypeName = "EthernetGateway";
 #else
   rtsnowConfig.deviceTypeName = "RTSNow-UNADYN";
 #endif
@@ -582,13 +690,27 @@ void setup()
   // it here instead of WiFi.localIP() directly is what lets this same
   // line correctly report an Ethernet board's IP too, even though
   // WiFi.status() is never WL_CONNECTED there (see rtsnow_node.h's
-  // ipv4AddressProvider comment for why this hook exists).
+  // ipv4AddressProvider comment for why this hook exists). Falls back to
+  // the WiFi fallback's own IP on BOARD_ATOMS3_POE when Ethernet isn't
+  // connected, so the gateway's known-devices list shows whichever
+  // address is actually reachable rather than always 0 when only the
+  // fallback is up.
   rtsnowConfig.ipv4AddressProvider = []() -> uint32_t {
-    return Network.isConnected() ? static_cast<uint32_t>(Network.localIP()) : 0;
+    if (Network.isConnected())
+      return static_cast<uint32_t>(Network.localIP());
+#if defined(BOARD_ATOMS3_POE)
+    if (WiFi.status() == WL_CONNECTED)
+      return static_cast<uint32_t>(WiFi.localIP());
+#endif
+    return 0;
   };
   rtsnowNodeBegin(rtsnowConfig);
 
+#if defined(BOARD_ATOMS3_POE)
+  if (wifiOk || poeWifiFallbackOk)
+#else
   if (wifiOk)
+#endif
   {
     setupOta();
   }
@@ -609,7 +731,11 @@ void loop()
   Network.loop();
   Registers.task();
   Registers.processPendingWrite();
+#if defined(BOARD_ATOMS3_POE)
+  PoeStatus.handleClient();
+#else
   DryerWeb.handleClient();
+#endif
   rtsnowNodeLoop(); // no-op until rtsnowNodeBegin() has run
   checkButton();
   updateLed();

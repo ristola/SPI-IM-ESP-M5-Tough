@@ -12,6 +12,7 @@
 #include "ModbusRegisterMap.h"
 #include "ModelFactory.h"
 #include "SpiCcp.h"
+#include "rtslogo.h"
 #include "rtsnow_node.h"
 
 DryerWebServer DryerWeb;
@@ -156,6 +157,8 @@ namespace
 <title>RTS-Now Dashboard</title>
 <style>
   body { font-family: -apple-system, Arial, sans-serif; margin: 0; padding: 16px; background: #111; color: #eee; }
+  #header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  #header img { width: 84px; height: 84px; flex-shrink: 0; background: #fff; padding: 8px; border-radius: 8px; box-sizing: border-box; }
   h1 { font-size: 1.3em; margin: 0 0 4px; }
   h2 { font-size: 1.05em; margin: 20px 0 6px; color: #9cf; }
   #meta { color: #aaa; font-size: 0.9em; margin-bottom: 12px; }
@@ -180,8 +183,13 @@ namespace
 </style>
 </head>
 <body>
-  <h1>RTS-Now Dashboard</h1>
-  <div id="meta">loading...</div>
+  <div id="header">
+    <img src="/logo.gif" alt="RTS">
+    <div>
+      <h1>RTS-Now Dashboard</h1>
+      <div id="meta">loading...</div>
+    </div>
+  </div>
 
   <div id="tabBar">
     <button class="tabBtn" id="tabBtnNormal">Normal SPI Functions</button>
@@ -888,6 +896,12 @@ setInterval(refresh, 2000);
 
   void handleRoot() { server.send(200, "text/html", kIndexHtml); }
 
+  // send() (String-based) would truncate at the PNG's own embedded null
+  // bytes - send_P()'s explicit-length overload is the binary-safe one,
+  // despite the P suggesting PROGMEM-only use (ESP32's flash is memory-
+  // mapped, so a plain array works fine as the PGM_P argument here).
+  void handleLogo() { server.send_P(200, "image/gif", reinterpret_cast<PGM_P>(rts_gif), rts_gif_len); }
+
   void handleData()
   {
     String json;
@@ -1543,6 +1557,7 @@ setInterval(refresh, 2000);
 void DryerWebServer::begin()
 {
   server.on("/", handleRoot);
+  server.on("/logo.gif", handleLogo);
   server.on("/api/data", handleData);
   server.on("/api/baud", HTTP_POST, handleSetBaud);
   server.on("/api/equipment", HTTP_POST, handleSetEquipment);
