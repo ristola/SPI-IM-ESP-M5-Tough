@@ -301,7 +301,8 @@ namespace
   constexpr uint16_t kLedCount = 1;
   Adafruit_NeoPixel led(kLedCount, Pins::RGB_LED, NEO_GRB + NEO_KHZ800);
 
-  bool otaInProgress = false;
+  bool otaInProgress = false; // WiFi OTA only - gates loop()'s early-return below (ArduinoOTA blocks synchronously for the whole transfer)
+  bool otaLedActive = false;  // true during ANY OTA method (WiFi or ESP-NOW) - the only thing updateLed() itself checks
 
   // Recomputed every loop() from current state rather than event-driven, so
   // it self-corrects if e.g. WiFi drops without needing an explicit hook at
@@ -312,7 +313,7 @@ namespace
     bool blinkOn = (millis() / kBlinkIntervalMs) % 2 == 0;
 
     uint32_t color;
-    if (otaInProgress)
+    if (otaLedActive)
     {
       color = blinkOn ? led.Color(255, 255, 255) : 0; // fast white blink - highest priority
     }
@@ -407,6 +408,7 @@ namespace
     ArduinoOTA.onStart([]()
                        {
     otaInProgress = true;
+    otaLedActive = true;
     updateLed();
     Serial.println("OTA: starting"); });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
@@ -421,10 +423,25 @@ namespace
     ArduinoOTA.onError([](ota_error_t error)
                        {
     otaInProgress = false;
+    otaLedActive = false;
     Serial.printf("OTA: error (code %d) - resuming normal operation\n", static_cast<int>(error)); });
 
     ArduinoOTA.begin();
     Serial.printf("OTA ready - hostname \"%s\"\n", hostname);
+  }
+
+  // Wired up as RTSNowNodeConfig::onOtaActiveChanged - fires on an
+  // ESP-NOW-over-mesh OTA transfer's start/end, giving it the same LED
+  // signal as WiFi OTA above. Deliberately does NOT touch otaInProgress:
+  // that flag also gates loop()'s early-return (see loop() below), which
+  // exists because ArduinoOTA blocks synchronously for its whole transfer -
+  // the ESP-NOW OTA path is the opposite, driven chunk-by-chunk through
+  // rtsnowNodeLoop() on every normal loop() tick, so short-circuiting loop()
+  // here would stop it from ever receiving another chunk.
+  void onEspNowOtaActiveChanged(bool active)
+  {
+    otaLedActive = active;
+    updateLed();
   }
 
   // Onboard button held 3s = restart. No provisioning/credentials to "forget"
@@ -560,6 +577,7 @@ void setup()
   rtsnowConfig.registerBlockProvider = fillRegisterBlock;
   rtsnowConfig.onBeforeReboot = markRebootedRemotely;
   rtsnowConfig.onGenericSetting = onRemoteSetting;
+  rtsnowConfig.onOtaActiveChanged = onEspNowOtaActiveChanged;
   // Network abstracts WiFi vs. Ethernet (see NetworkManager.cpp) - using
   // it here instead of WiFi.localIP() directly is what lets this same
   // line correctly report an Ethernet board's IP too, even though
