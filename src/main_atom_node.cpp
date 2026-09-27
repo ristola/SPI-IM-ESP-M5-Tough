@@ -191,6 +191,14 @@ namespace
   {
     if (strcmp(setting.key, "equipmentType") == 0 && setting.valueType == RTSNOW_SETTING_STRING)
     {
+#if defined(BOARD_ATOMS3_POE)
+      // No RS-485 equipment exists on this board at all (see setup()'s own
+      // comment forcing Model Type to ETHERNET) - Dryer/Crystallizer aren't
+      // valid choices here, unlike spiAddress/model below there's no
+      // ETHERNET-equivalent equipmentType to accept instead, so this is a
+      // flat rejection.
+      return false;
+#else
       if (strcmp(setting.stringValue, "Dryer") == 0)
       {
         Settings.setEquipmentType(DeviceSettings::EquipmentType::Dryer);
@@ -212,10 +220,19 @@ namespace
       if (modbusStarted)
         Registers.set(ModbusReg::kModelType - ModbusReg::kFirstRegister, Settings.modelTypeCode());
       return true;
+#endif
     }
 
     if (strcmp(setting.key, "model") == 0 && setting.valueType == RTSNOW_SETTING_STRING)
     {
+#if defined(BOARD_ATOMS3_POE)
+      // Already pinned to kEthernetModels[0] and can't be anything else on
+      // this board (see setup()'s own comment) - accept only a no-op
+      // re-confirmation of that same value, reject every real model choice.
+      if (strcmp(setting.stringValue, DeviceSettings::kEthernetModels[0]) == 0)
+        return true;
+      return false;
+#else
       // ETHERNET is reachable regardless of the current equipment type,
       // same as picking FC vs. FD doesn't require switching equipment
       // type away from Dryer - deliberately does NOT call
@@ -258,10 +275,15 @@ namespace
         }
       }
       return false;
+#endif
     }
 
     if (strcmp(setting.key, "spiAddress") == 0 && setting.valueType == RTSNOW_SETTING_INT32)
     {
+#if defined(BOARD_ATOMS3_POE)
+      // No RS-485 station address applies here - see setup()'s own comment.
+      return false;
+#else
       if (setting.intValue < 0 || setting.intValue > 255)
         return false;
       uint8_t address = static_cast<uint8_t>(setting.intValue);
@@ -270,6 +292,7 @@ namespace
       if (modbusStarted)
         Registers.set(ModbusReg::kSpiStationId - ModbusReg::kFirstRegister, address);
       return true;
+#endif
     }
 
     if (strcmp(setting.key, "spiBaudRate") == 0 && setting.valueType == RTSNOW_SETTING_INT32)
@@ -468,18 +491,21 @@ namespace
     otaLedActive = active;
     updateLed();
 #if defined(BOARD_ATOMS3_POE)
+    // Only relevant when WiFi is actually up as the fallback transport
+    // (Ethernet down) - if Ethernet is connected, WiFi is already
+    // disconnected by design (see setup()'s own comment on why this board
+    // is single-transport-at-a-time), so there's nothing to pause, and
+    // reconnecting it after the transfer would wrongly bring up a second
+    // transport this board should never have simultaneously.
+    if (Network.isConnected())
+      return;
     // An ESP-NOW-over-mesh OTA transfer sustains hundreds of back-to-back
-    // Update.write() flash writes - observed live to reboot this board
-    // partway through (uptime dropping between two /api/status checks
-    // proved it) once WiFi was also kept associated alongside Ethernet
-    // for network-OTA reachability (see setup() above). The beacon/ARP/
-    // DHCP-renewal housekeeping plus two dual Ethernet+WiFi HTTP
-    // listeners apparently pushes it over some CPU/heap limit during the
-    // write-heavy stretch. Dropping the WiFi association (not
-    // WiFi.mode() - ESP-NOW still needs STA radio mode) for just the
-    // transfer's duration frees that budget without losing network-OTA
-    // reachability the rest of the time; Ethernet keeps the RTS-NOW
-    // protocol and status page up throughout regardless.
+    // Update.write() flash writes - real-hardware testing found dropping
+    // the WiFi association (not WiFi.mode() - ESP-NOW still needs STA
+    // radio mode) for just the transfer's duration measurably helps
+    // reliability, presumably by freeing up CPU/radio budget otherwise
+    // spent on WiFi-STA housekeeping (beacon/ARP/DHCP-renewal traffic) and
+    // the WiFi-side status page listener during the write-heavy stretch.
     if (active)
     {
       Serial.println("ESP-NOW OTA starting - dropping WiFi association to free up headroom");
@@ -487,7 +513,7 @@ namespace
     }
     else
     {
-      Serial.println("ESP-NOW OTA finished - reconnecting WiFi");
+      Serial.println("ESP-NOW OTA finished - reconnecting WiFi fallback");
       WiFi.begin(Settings.wifiSsid().c_str(), Settings.wifiPassword().c_str());
     }
 #endif
@@ -568,30 +594,47 @@ void setup()
   }
 
 #if defined(BOARD_ATOMS3_POE)
-  // WiFi is brought up unconditionally, even when Ethernet already came up
-  // above - kept specifically so ArduinoOTA (setupOta() below, gated on
-  // wifiOk||poeWifiFallbackOk) has a real network-OTA path independent of
-  // Ethernet: the W5500's own IP lives entirely on its separate hardware
-  // TCP/IP stack, invisible to ArduinoOTA/WiFiUDP (which only ever talks
-  // over the ESP32's native lwIP/WiFi stack), so without this, Ethernet
-  // succeeding would leave this board with no ArduinoOTA-reachable IP at
-  // all. The status page still only shows Ethernet when it's up (see
-  // PoeStatusServer.cpp's writeStatusJsonResponse) - this is a real,
-  // functioning WiFi association kept for OTA/serial-free reachability,
-  // just not surfaced there. Note this does NOT change WiFi.mode(WIFI_STA)
-  // itself - that was already on regardless (ESP-NOW needs the radio in
-  // STA mode even with no AP association at all).
-  Serial.println("Connecting WiFi (kept up alongside Ethernet for network OTA)...");
-  WiFi.begin(Settings.wifiSsid().c_str(), Settings.wifiPassword().c_str());
-  uint32_t wifiFallbackStart = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiFallbackStart < 10000)
-    delay(250);
-  bool poeWifiFallbackOk = WiFi.status() == WL_CONNECTED;
-  if (poeWifiFallbackOk)
-    Serial.printf("WiFi OK: SSID=%s IP=%s RSSI=%d\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-                  WiFi.RSSI());
+  // WiFi fallback - only attempted when Ethernet (wifiOk, above) didn't
+  // come up. Briefly tried keeping WiFi associated unconditionally
+  // alongside a working Ethernet link (for ArduinoOTA reachability, since
+  // the W5500's IP lives on a separate hardware stack invisible to
+  // ArduinoOTA/WiFiUDP) - reverted: this board should only ever be
+  // reachable over ONE IP transport at a time, and real-hardware testing
+  // during ESP-NOW mesh OTA work found the extra WiFi-STA housekeeping
+  // (beacon/ARP/DHCP-renewal traffic) running alongside Ethernet's own
+  // W5500 SPI polling measurably hurt mesh-OTA reliability (a transfer
+  // that completed cleanly with WiFi off stalled repeatedly with it kept
+  // on). ArduinoOTA is simply unreachable while Ethernet is up as a
+  // result - not a regression, since it was already unreliable in that
+  // state for a different reason (see NetworkManager.cpp's own comment on
+  // M5_Ethernet's SPI polling contending with lwIP/WiFi's TCP stack).
+  // Does NOT touch WiFi.mode(WIFI_STA) itself - that stays on regardless,
+  // since ESP-NOW needs the radio in STA mode even with no AP association
+  // at all; "WiFi off" here only ever means "don't associate with an AP".
+  bool poeWifiFallbackOk = false;
+  if (!wifiOk)
+  {
+    // MUST resolve (success or timeout) before EspNow.begin() below:
+    // EspNowLink.cpp only force-picks an ESP-NOW fallback channel if WiFi
+    // isn't already connected, so this can't be left to race it - matches
+    // how the non-POE board already gets this ordering for free
+    // (Network.begin() itself blocks on WiFi there).
+    Serial.println("Ethernet down - trying WiFi fallback...");
+    WiFi.begin(Settings.wifiSsid().c_str(), Settings.wifiPassword().c_str());
+    uint32_t wifiFallbackStart = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - wifiFallbackStart < 10000)
+      delay(250);
+    poeWifiFallbackOk = WiFi.status() == WL_CONNECTED;
+    if (poeWifiFallbackOk)
+      Serial.printf("WiFi fallback OK: SSID=%s IP=%s RSSI=%d\n", WiFi.SSID().c_str(),
+                    WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    else
+      Serial.println("WiFi fallback FAILED - neither transport is up");
+  }
   else
-    Serial.println("WiFi FAILED (Ethernet may still be up)");
+  {
+    Serial.println("Ethernet OK - skipping WiFi fallback");
+  }
 #endif
 
   if (wifiOk)
