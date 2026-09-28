@@ -88,6 +88,20 @@ class DeviceSettings {
   String wifiPassword();
   void setWifiCredentials(const String& ssid, const String& password);
 
+  // Remote kill switch for this node's own WiFi radio, settable over
+  // RTS-NOW's generic settings mechanism (key "wifiEnabled") from the
+  // gateway's own web status page - see main_atom_node.cpp's
+  // onRemoteSetting(). Persisted (not just an in-RAM flag) so an
+  // intentional mesh-only node stays mesh-only across a reboot, rather
+  // than the very first WiFi.begin() in setup() silently re-associating
+  // it. Does NOT affect ESP-NOW at all - that's a separate radio mode
+  // (WiFi.mode(WIFI_STA) stays on regardless, see setup()'s own comment),
+  // so a node with this set false is still fully reachable to turn it
+  // back on. Defaults true - every node before this setting existed
+  // behaved as if it were.
+  bool wifiEnabled();
+  void setWifiEnabled(bool enabled);
+
  private:
   Preferences prefs_;
 };

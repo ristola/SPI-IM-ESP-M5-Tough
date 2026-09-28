@@ -92,3 +92,6 @@ void DeviceSettings::setWifiCredentials(const String& ssid, const String& passwo
   prefs_.putString("wifi_ssid", ssid);
   prefs_.putString("wifi_pass", password);
 }
+
+bool DeviceSettings::wifiEnabled() { return prefs_.getBool("wifi_en", true); }
+void DeviceSettings::setWifiEnabled(bool enabled) { prefs_.putBool("wifi_en", enabled); }

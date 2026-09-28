@@ -168,6 +168,35 @@ namespace
     }
   }
 
+  // Wired up as RTSNowNodeConfig::onWriteRegister - lets RTS-ESPNOW-
+  // Gateway's desktop app write a real dryer/crystallizer data register
+  // (Process Setpoint, Process Limit Delta, Machine Status - the actual
+  // start/stop/clear-alarms command, Dew Point Trigger) over the mesh,
+  // for a node with no WiFi IP at all (the direct-by-IP
+  // http://<ip>/api/writeregister path a WiFi-reachable node already
+  // uses can't work there at all). Queues through the exact same
+  // deferred write path a Modbus TCP client's own onSetHreg callback
+  // already uses (see DryerRegisters::queuePendingWrite()'s own comment
+  // for why this is deferred rather than calling
+  // ActiveModel->writeRegister() directly here) - EquipmentModel::
+  // writeRegister() itself is what actually reaches the physical
+  // equipment and is what really decides which registers are writable,
+  // so this doesn't re-implement that; it just checks the same allowlist
+  // up front so an unwritable register number gets an honest, immediate
+  // ok=false in the ESP-NOW ack instead of always claiming success (the
+  // deferred queue has no way to report the real outcome back to this
+  // return value once it's queued).
+  bool onWriteRegister(uint16_t reg, float value)
+  {
+    if (!modbusStarted)
+      return false;
+    if (reg != ModbusReg::kProcessSetpoint && reg != ModbusReg::kProcessDelta &&
+        reg != ModbusReg::kMachineStatus && reg != ModbusReg::kDewpointTrigger)
+      return false;
+    Registers.queuePendingWrite(reg, value);
+    return true;
+  }
+
   // Wired up as RTSNowNodeConfig::onGenericSetting - lets RTS-ESPNOW-
   // Gateway's desktop app push the same 4 fields the web dashboard's own
   // Equipment/Model/Station ID/Baud buttons already write (see
@@ -312,6 +341,36 @@ namespace
       }
 #endif
       return false;
+    }
+
+    // Immediate effect (unlike wifiSsid/wifiPassword just below, which
+    // deliberately only take effect on the next boot) - this is meant as
+    // a live remote kill switch, sent from the gateway's own web status
+    // page (see DeviceSettings::wifiEnabled()'s own comment). Persisted
+    // too, so it survives this node's own next reboot regardless.
+    if (strcmp(setting.key, "wifiEnabled") == 0 && setting.valueType == RTSNOW_SETTING_BOOL)
+    {
+#if defined(BOARD_ATOMS3_POE)
+      // This board's WiFi is an Ethernet fallback, not something toggled
+      // independently - see setup()'s own Ethernet-priority comment.
+      // Rejected rather than silently doing something unexpected to
+      // whichever transport is actually up right now.
+      return false;
+#else
+      Settings.setWifiEnabled(setting.boolValue);
+      Serial.println(setting.boolValue
+                          ? "WiFi enabled by remote setting - reconnecting"
+                          : "WiFi disabled by remote setting - disconnecting (ESP-NOW unaffected, still reachable over mesh)");
+      // Goes through NetworkManager itself (not a bare WiFi.begin()/
+      // disconnect() here) so its own loop() watchdog knows about this -
+      // otherwise that watchdog just sees a dropped link on its own next
+      // tick and "helpfully" reconnects it again within seconds, silently
+      // undoing this. See NetworkManager::setEnabled()'s own comment -
+      // this was a real bug, found live (WiFi kept coming back on its own
+      // ~10s after being switched off remotely).
+      Network.setEnabled(setting.boolValue);
+      return true;
+#endif
     }
 
     // No Modbus register to mirror here (unlike equipmentType/model/
@@ -574,6 +633,25 @@ void setup()
   Settings.begin();
   Discovery.begin(); // recover any devIds/commands a prior interrupted scan already found
 
+  // wifiEnabled is a remote kill switch (RTSNOW_SET_SETTING key
+  // "wifiEnabled", see onRemoteSetting() below) - only meaningful on a
+  // plain WiFi node, always true on the POE board above (its WiFi is an
+  // Ethernet fallback, not something toggled independently).
+  // Network.initEnabled() must run before begin() so begin() itself can
+  // honor it (skip the actual radio connect attempt while still storing
+  // ssid/password for a later remote setEnabled(true) - see
+  // NetworkManager::begin()'s own comment) - this is what makes a
+  // "disabled" node actually stay off WiFi across its own reboot instead
+  // of this very begin() call silently reconnecting it every time.
+  // begin() itself is always called regardless (never skipped via a
+  // wifiAttempted && short-circuit here) specifically so those credentials
+  // always get stored even when disabled.
+#if defined(BOARD_ATOMS3_POE)
+  bool wifiAttempted = true;
+#else
+  Network.initEnabled(Settings.wifiEnabled());
+  bool wifiAttempted = Settings.wifiEnabled();
+#endif
   bool wifiOk = Network.begin(Settings.wifiSsid().c_str(), Settings.wifiPassword().c_str());
   if (wifiOk)
   {
@@ -583,6 +661,10 @@ void setup()
     Serial.printf("WiFi OK: SSID=%s IP=%s RSSI=%d\n", WiFi.SSID().c_str(), Network.localIP().toString().c_str(),
                   WiFi.RSSI());
 #endif
+  }
+  else if (!wifiAttempted)
+  {
+    Serial.println("WiFi disabled by remote setting - staying mesh-only (ESP-NOW unaffected)");
   }
   else
   {
@@ -726,6 +808,7 @@ void setup()
   rtsnowConfig.firmwareVersionMajor = FirmwareVersion::kMajor;
   rtsnowConfig.firmwareVersionMinor = FirmwareVersion::kMinor;
   rtsnowConfig.registerBlockProvider = fillRegisterBlock;
+  rtsnowConfig.onWriteRegister = onWriteRegister;
   rtsnowConfig.onBeforeReboot = markRebootedRemotely;
   rtsnowConfig.onGenericSetting = onRemoteSetting;
   rtsnowConfig.onOtaActiveChanged = onEspNowOtaActiveChanged;

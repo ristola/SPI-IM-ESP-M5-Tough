@@ -17,6 +17,27 @@ class NetworkManager {
   bool isConnected() const;
   IPAddress localIP() const;
 
+  // Boot-time only, no side effects (no connect/disconnect call) - just
+  // sets the flag that begin()/loop() below both honor, so it must be
+  // called *before* begin() (see main_atom_node.cpp's setup()). Inert on
+  // the Ethernet (BOARD_ATOMS3_POE) build - that transport has no
+  // equivalent toggle, see setEnabled()'s own comment for why.
+  void initEnabled(bool enabled);
+
+  // Live runtime toggle - unlike initEnabled() above, this immediately
+  // acts (disconnects right now, or reconnects right now with whichever
+  // credentials begin() last stored) and is what main_atom_node.cpp's
+  // onRemoteSetting() calls for the remote "wifiEnabled" kill switch.
+  // Needed as its own method rather than a bare WiFi.disconnect() from
+  // outside this class, because loop()'s own reconnect watchdog doesn't
+  // know about an intentional disable otherwise - confirmed live: the
+  // node's WiFi kept coming back on its own within kRetryIntervalMs of
+  // being switched off remotely, since loop() just saw a dropped link and
+  // "helpfully" reconnected it. Inert on the Ethernet build (no toggle
+  // concept - that board's WiFi is a fallback transport, not something a
+  // user turns off independently).
+  void setEnabled(bool enabled);
+
   // Call periodically (e.g. every loop()) to retry a dropped connection
   // (WiFi build) or renew the DHCP lease (Ethernet build) without blocking.
   void loop();
@@ -82,6 +103,7 @@ class NetworkManager {
  private:
   String _ssid;
   String _password;
+  bool _enabled = true;
   uint32_t _lastAttemptMs = 0;
   static constexpr uint32_t kRetryIntervalMs = 10000;
   char _lastDiagnostic[192] = "";

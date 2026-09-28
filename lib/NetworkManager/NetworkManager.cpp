@@ -282,6 +282,13 @@ bool NetworkManager::isConnected() const {
 
 IPAddress NetworkManager::localIP() const { return Ethernet.localIP(); }
 
+// Inert on this board - Ethernet has no equivalent of the WiFi build's
+// remote kill switch (see setEnabled()'s own comment in NetworkManager.h),
+// so there's nothing for either of these to actually do here. Defined
+// anyway so the shared header's API compiles for both boards.
+void NetworkManager::initEnabled(bool enabled) { _enabled = enabled; }
+void NetworkManager::setEnabled(bool enabled) { _enabled = enabled; }
+
 void NetworkManager::loop() {
   if (millis() - s_lastMaintainMs < kMaintainIntervalMs) return;
   s_lastMaintainMs = millis();
@@ -291,8 +298,19 @@ void NetworkManager::loop() {
 #else
 
 bool NetworkManager::begin(const char* ssid, const char* password, uint32_t timeoutMs) {
+  // Stored unconditionally, even when _enabled is already false below -
+  // setup() now always calls begin() (see main_atom_node.cpp's own
+  // comment), so this is the only place real credentials ever get
+  // captured. Without this, a node that boots with wifiEnabled=false
+  // would have empty _ssid/_password forever, and a later remote
+  // setEnabled(true) would try to associate with an empty SSID.
   _ssid = ssid;
   _password = password;
+
+  if (!_enabled) {
+    _lastAttemptMs = millis();
+    return false;
+  }
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(_ssid.c_str(), _password.c_str());
@@ -309,7 +327,24 @@ bool NetworkManager::begin(const char* ssid, const char* password, uint32_t time
 bool NetworkManager::isConnected() const { return WiFi.status() == WL_CONNECTED; }
 IPAddress NetworkManager::localIP() const { return WiFi.localIP(); }
 
+void NetworkManager::initEnabled(bool enabled) { _enabled = enabled; }
+
+void NetworkManager::setEnabled(bool enabled) {
+  _enabled = enabled;
+  if (enabled) {
+    _lastAttemptMs = millis();
+    WiFi.begin(_ssid.c_str(), _password.c_str());
+  } else {
+    WiFi.disconnect();
+  }
+}
+
 void NetworkManager::loop() {
+  // Without this check, an intentional setEnabled(false) (see its own
+  // comment) got silently undone by this exact watchdog within
+  // kRetryIntervalMs of the disable - confirmed live, this was the real
+  // bug behind "disabling WiFi doesn't actually turn it off".
+  if (!_enabled) return;
   if (isConnected()) return;
   if (millis() - _lastAttemptMs < kRetryIntervalMs) return;
 
