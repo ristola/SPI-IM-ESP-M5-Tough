@@ -999,7 +999,18 @@ setInterval(refresh, 2000);
         json += ",";
       json += "{\"reg\":" + String(reg) + ",";
       json += "\"name\":\"" + String(kDeviceRegNames[reg - ModbusReg::kFirstRegister]) + "\",";
-      json += "\"value\":" + String(Registers.get(reg - ModbusReg::kFirstRegister)) + "}";
+      json += "\"value\":" + String(Registers.get(reg - ModbusReg::kFirstRegister));
+      // Only Board Temp/SPI CRC Error get a real ageMs here - see
+      // DryerRegisters::registerAgeMs()'s own comment for why the rest of
+      // this block doesn't (a stable config value showing a large/growing
+      // age looks like staleness, not the "confirmed unchanged" it
+      // actually is). The desktop app's Registers dialog already has its
+      // own fallback for whichever entries omit this field - see
+      // dryer_detail_page.py's _on_status_received().
+      uint32_t ageMs = Registers.registerAgeMs(reg);
+      if (ageMs != UINT32_MAX)
+        json += ",\"ageMs\":" + String(ageMs);
+      json += "}";
     }
     json += "]}";
 

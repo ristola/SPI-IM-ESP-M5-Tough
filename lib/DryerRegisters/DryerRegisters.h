@@ -35,6 +35,23 @@ class DryerRegisters {
   void set(uint8_t index, uint16_t value);
   uint16_t get(uint8_t index);
 
+  // Real per-register age, but only for the two XBEE SETUP registers
+  // (40001-40009) that are genuinely live - 40007 Board Temp and 40009
+  // SPI CRC Error, both re-set every updateDryerReadings() tick in
+  // main.cpp/main_atom_node.cpp. Mirrors EquipmentModel::registerAgeMs()'s
+  // own pattern/UINT32_MAX-means-never-set convention, but deliberately
+  // scoped to just these two rather than every index in this table - the
+  // rest of the XBEE SETUP block is either compile-time-constant
+  // (Software Version) or only changes on an explicit config write, so a
+  // blanket "time since last set()" for those would show a misleadingly
+  // large/growing number for a value that's simply unchanged, not stale
+  // (see DryerWebServer.cpp's own comment where this is consumed).
+  // Returns UINT32_MAX for any other register, or for one of these two
+  // that hasn't been set yet (e.g. Board Temp on a board with no
+  // temperature_sensor peripheral - see main_atom_node.cpp's own
+  // BOARD_ATOMS3LITE guard).
+  uint32_t registerAgeMs(uint16_t modbusReg) const;
+
   // Called by onSetSpiRegister() - not meant for other callers, but needs
   // to be public since that's a free function, not a member.
   void queuePendingWrite(uint16_t modbusReg, float value);
@@ -45,6 +62,9 @@ class DryerRegisters {
   bool _hasPendingWrite = false;
   uint16_t _pendingWriteReg = 0;
   float _pendingWriteValue = 0;
+
+  uint32_t _boardTempUpdatedMs = UINT32_MAX;
+  uint32_t _crcErrorUpdatedMs = UINT32_MAX;
 };
 
 extern DryerRegisters Registers;

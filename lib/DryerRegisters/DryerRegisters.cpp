@@ -157,9 +157,29 @@ void DryerRegisters::set(uint8_t index, uint16_t value) {
   _mb.cbEnable(false);
   _mb.Hreg(index, value);
   _mb.cbEnable(true);
+
+  // See registerAgeMs()'s own comment for why only these two get tracked
+  // here, not every index this table holds. Checked by index, not by
+  // caller - so this stays correct regardless of which .cpp calls
+  // set(kBoardTemp - kFirstRegister, ...), and correctly never stamps at
+  // all on a board that never calls it (e.g. Board Temp on the classic
+  // ESP32 Tough, which has no temperature_sensor peripheral - see
+  // main_atom_node.cpp's own BOARD_ATOMS3LITE guard).
+  if (index == ModbusReg::kBoardTemp - ModbusReg::kFirstRegister)
+    _boardTempUpdatedMs = millis();
+  else if (index == ModbusReg::kSpiCrcError - ModbusReg::kFirstRegister)
+    _crcErrorUpdatedMs = millis();
 }
 
 uint16_t DryerRegisters::get(uint8_t index) {
   if (index >= DryerPacket::kMaxRegisters) return 0;
   return _mb.Hreg(index);
+}
+
+uint32_t DryerRegisters::registerAgeMs(uint16_t modbusReg) const {
+  if (modbusReg == ModbusReg::kBoardTemp)
+    return _boardTempUpdatedMs == UINT32_MAX ? UINT32_MAX : millis() - _boardTempUpdatedMs;
+  if (modbusReg == ModbusReg::kSpiCrcError)
+    return _crcErrorUpdatedMs == UINT32_MAX ? UINT32_MAX : millis() - _crcErrorUpdatedMs;
+  return UINT32_MAX;
 }
